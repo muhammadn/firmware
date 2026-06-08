@@ -16,6 +16,7 @@
 #include "input/ButtonThread.h"
 #endif
 #include "main.h"
+#include <array>
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -321,7 +322,7 @@ void NotificationRenderer::drawNumberPicker(OLEDDisplay *display, OLEDDisplayUiS
         return;
 
     uint16_t totalLines = lineCount + 2;
-    const char *linePointers[totalLines + 1] = {0}; // this is sort of a dynamic allocation
+    std::vector<const char *> linePointers(totalLines + 1, nullptr);
 
     // copy the linestarts to display to the linePointers holder
     for (uint16_t i = 0; i < lineCount; i++) {
@@ -342,7 +343,7 @@ void NotificationRenderer::drawNumberPicker(OLEDDisplay *display, OLEDDisplayUiS
     linePointers[lineCount++] = digits.c_str();
     linePointers[lineCount++] = arrowPointer.c_str();
 
-    drawNotificationBox(display, state, linePointers, totalLines, 0);
+    drawNotificationBox(display, state, linePointers.data(), totalLines, 0);
 }
 
 void NotificationRenderer::drawNodePicker(OLEDDisplay *display, OLEDDisplayUiState *state)
@@ -400,13 +401,14 @@ void NotificationRenderer::drawNodePicker(OLEDDisplay *display, OLEDDisplayUiSta
     uint8_t effectiveLineHeight = FONT_HEIGHT_SMALL - 3;
     uint8_t visibleTotalLines = std::min<uint8_t>(totalLines, (screenHeight - vPadding * 2) / effectiveLineHeight);
     uint8_t linesShown = lineCount;
-    const char *linePointers[visibleTotalLines + 1] = {0}; // this is sort of a dynamic allocation
+    std::vector<const char *> linePointers(visibleTotalLines + 1, nullptr);
 
     // copy the linestarts to display to the linePointers holder
     for (int i = 0; i < lineCount; i++) {
         linePointers[i] = lineStarts[i];
     }
-    char scratchLineBuffer[visibleTotalLines - lineCount][64];
+    const uint8_t optionLinesCapacity = (visibleTotalLines > lineCount) ? (visibleTotalLines - lineCount) : 0;
+    std::vector<std::array<char, 64>> scratchLineBuffer(optionLinesCapacity);
 
     uint8_t firstOptionToShow = 0;
     if (curSelected > 1 && alertBannerOptions > visibleTotalLines - lineCount) {
@@ -444,26 +446,26 @@ void NotificationRenderer::drawNodePicker(OLEDDisplay *display, OLEDDisplayUiSta
         if (i == curSelected) {
             selectedNodenum = node ? node->num : 0;
             if (currentResolution == ScreenResolution::High) {
-                strncpy(scratchLineBuffer[scratchLineNum], "> ", 3);
-                strncpy(scratchLineBuffer[scratchLineNum] + 2, tempName, sizeof(scratchLineBuffer[scratchLineNum]) - 3);
-                scratchLineBuffer[scratchLineNum][sizeof(scratchLineBuffer[scratchLineNum]) - 1] = '\0';
-                const size_t used = strnlen(scratchLineBuffer[scratchLineNum], sizeof(scratchLineBuffer[scratchLineNum]) - 1);
-                strncpy(scratchLineBuffer[scratchLineNum] + used, " <", sizeof(scratchLineBuffer[scratchLineNum]) - used - 1);
+                strncpy(scratchLineBuffer[scratchLineNum].data(), "> ", 3);
+                strncpy(scratchLineBuffer[scratchLineNum].data() + 2, tempName, scratchLineBuffer[scratchLineNum].size() - 3);
+                scratchLineBuffer[scratchLineNum][scratchLineBuffer[scratchLineNum].size() - 1] = '\0';
+                const size_t used = strnlen(scratchLineBuffer[scratchLineNum].data(), scratchLineBuffer[scratchLineNum].size() - 1);
+                strncpy(scratchLineBuffer[scratchLineNum].data() + used, " <", scratchLineBuffer[scratchLineNum].size() - used - 1);
             } else {
-                strncpy(scratchLineBuffer[scratchLineNum], ">", 2);
-                strncpy(scratchLineBuffer[scratchLineNum] + 1, tempName, sizeof(scratchLineBuffer[scratchLineNum]) - 2);
-                scratchLineBuffer[scratchLineNum][sizeof(scratchLineBuffer[scratchLineNum]) - 1] = '\0';
-                const size_t used = strnlen(scratchLineBuffer[scratchLineNum], sizeof(scratchLineBuffer[scratchLineNum]) - 1);
-                strncpy(scratchLineBuffer[scratchLineNum] + used, "<", sizeof(scratchLineBuffer[scratchLineNum]) - used - 1);
+                strncpy(scratchLineBuffer[scratchLineNum].data(), ">", 2);
+                strncpy(scratchLineBuffer[scratchLineNum].data() + 1, tempName, scratchLineBuffer[scratchLineNum].size() - 2);
+                scratchLineBuffer[scratchLineNum][scratchLineBuffer[scratchLineNum].size() - 1] = '\0';
+                const size_t used = strnlen(scratchLineBuffer[scratchLineNum].data(), scratchLineBuffer[scratchLineNum].size() - 1);
+                strncpy(scratchLineBuffer[scratchLineNum].data() + used, "<", scratchLineBuffer[scratchLineNum].size() - used - 1);
             }
-            scratchLineBuffer[scratchLineNum][sizeof(scratchLineBuffer[scratchLineNum]) - 1] = '\0';
+            scratchLineBuffer[scratchLineNum][scratchLineBuffer[scratchLineNum].size() - 1] = '\0';
         } else {
-            strncpy(scratchLineBuffer[scratchLineNum], tempName, sizeof(scratchLineBuffer[scratchLineNum]) - 1);
-            scratchLineBuffer[scratchLineNum][sizeof(scratchLineBuffer[scratchLineNum]) - 1] = '\0';
+            strncpy(scratchLineBuffer[scratchLineNum].data(), tempName, scratchLineBuffer[scratchLineNum].size() - 1);
+            scratchLineBuffer[scratchLineNum][scratchLineBuffer[scratchLineNum].size() - 1] = '\0';
         }
-        linePointers[linesShown] = scratchLineBuffer[scratchLineNum++];
+        linePointers[linesShown] = scratchLineBuffer[scratchLineNum++].data();
     }
-    drawNotificationBox(display, state, linePointers, totalLines, firstOptionToShow);
+    drawNotificationBox(display, state, linePointers.data(), totalLines, firstOptionToShow);
 }
 
 void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisplayUiState *state)
@@ -471,7 +473,7 @@ void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisp
     // === Layout Configuration ===
     constexpr uint16_t vPadding = 2;
 
-    uint16_t optionWidths[alertBannerOptions] = {0};
+    std::vector<uint16_t> optionWidths(alertBannerOptions, 0);
     uint16_t maxWidth = 0;
     uint16_t arrowsWidth = display->getStringWidth(">  <", 4, true);
     uint16_t lineWidths[MAX_LINES] = {0};
@@ -563,7 +565,7 @@ void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisp
     uint8_t effectiveLineHeight = FONT_HEIGHT_SMALL - 3;
     uint8_t visibleTotalLines = std::min<uint8_t>(totalLines, (screenHeight - vPadding * 2) / effectiveLineHeight);
     uint8_t linesShown = lineCount;
-    const char *linePointers[visibleTotalLines + 1] = {0}; // this is sort of a dynamic allocation
+    std::vector<const char *> linePointers(visibleTotalLines + 1, nullptr);
 
     // copy the linestarts to display to the linePointers holder
     for (int i = 0; i < lineCount; i++) {
@@ -605,9 +607,9 @@ void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisp
         }
     }
     if (alertBannerOptions > 0) {
-        drawNotificationBox(display, state, linePointers, totalLines, firstOptionToShow, maxWidth);
+        drawNotificationBox(display, state, linePointers.data(), totalLines, firstOptionToShow, maxWidth);
     } else {
-        drawNotificationBox(display, state, linePointers, totalLines, firstOptionToShow);
+        drawNotificationBox(display, state, linePointers.data(), totalLines, firstOptionToShow);
     }
 }
 
@@ -621,11 +623,11 @@ void NotificationRenderer::drawNotificationBox(OLEDDisplay *display, OLEDDisplay
     constexpr uint16_t hPadding = 5;
     constexpr uint16_t vPadding = 2;
     bool needs_bell = false;
-    uint16_t lineWidths[totalLines] = {0};
-    uint16_t lineLengths[totalLines] = {0};
-    BannerFont lineFonts[totalLines] = {};
-    uint8_t lineEffectiveHeights[totalLines] = {0};
-    const char *renderLines[totalLines] = {0};
+    std::vector<uint16_t> lineWidths(totalLines, 0);
+    std::vector<uint16_t> lineLengths(totalLines, 0);
+    std::vector<BannerFont> lineFonts(totalLines, BANNER_FONT_DEFAULT);
+    std::vector<uint8_t> lineEffectiveHeights(totalLines, 0);
+    std::vector<const char *> renderLines(totalLines, nullptr);
     bool useTaggedBannerFonts = (current_notification_type == notificationTypeEnum::text_banner && alertBannerOptions == 0);
 
     if (maxWidth != 0)

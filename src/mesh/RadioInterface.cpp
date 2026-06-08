@@ -1053,6 +1053,9 @@ void RadioInterface::applyModemConfig()
     // Set up default configuration
     // No Sync Words in LORA mode
     meshtastic_Config_LoRaConfig &loraConfig = config.lora;
+#ifdef REGULATORY_LORA_REGIONCODE
+    loraConfig.region = REGULATORY_LORA_REGIONCODE;
+#endif
     const RegionInfo *newRegion = getRegion(loraConfig.region);
     myRegion = newRegion;
 

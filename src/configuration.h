@@ -114,7 +114,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // -----------------------------------------------------------------------------
 
 // Override user saved region, for producing region-locked builds
-// #define REGULATORY_LORA_REGIONCODE meshtastic_Config_LoRaConfig_RegionCode_SG_923
+#define REGULATORY_LORA_REGIONCODE meshtastic_Config_LoRaConfig_RegionCode_MY_919
 
 // Total system gain in dBm to subtract from Tx power to remain within regulatory and Tx PA limits
 // The value consists of PA gain + antenna gain (if variant has a non-removable antenna)

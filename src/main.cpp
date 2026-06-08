@@ -90,6 +90,9 @@ NRF54L15Bluetooth *nrf54l15Bluetooth = nullptr;
 #include <fstream>
 #include <iostream>
 #include <string>
+#if defined(SX1302_NATIVE_IPC_SHIM_ENABLE) && defined(__linux__)
+extern "C" void sx1302_ipc_shim_start(void);
+#endif
 #endif
 
 #ifdef ARCH_ESP32
@@ -830,6 +833,9 @@ void setup()
     if (portduino_config.lora_spi_dev != "ch341") {
         SPI.begin();
     }
+#if defined(SX1302_NATIVE_IPC_SHIM_ENABLE) && defined(__linux__)
+    sx1302_ipc_shim_start();
+#endif
 #elif !defined(ARCH_ESP32) // ARCH_RP2040
 #if defined(RAK3401) || defined(RAK13302)
     pinMode(WB_IO2, OUTPUT);
