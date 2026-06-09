@@ -1,6 +1,10 @@
 #include "SimRadio.h"
 #include "MeshService.h"
 #include "Router.h"
+#if defined(SX1302_NATIVE_IPC_SHIM_ENABLE) && defined(__linux__)
+extern "C" void sx1302_ipc_shim_tx(const uint8_t *buf, size_t len, uint32_t freq_hz,
+                                    uint8_t sf, uint32_t bw_hz, uint8_t cr, int8_t tx_power_dbm);
+#endif
 
 SimRadio::SimRadio() : NotifiedWorkerThread("SimRadio")
 {
@@ -208,6 +212,12 @@ void SimRadio::startSend(meshtastic_MeshPacket *txp)
     printPacket("Start low level send", txp);
     isReceiving = false;
     size_t numbytes = beginSending(txp);
+#if defined(SX1302_NATIVE_IPC_SHIM_ENABLE) && defined(__linux__)
+    sx1302_ipc_shim_tx(
+        reinterpret_cast<const uint8_t *>(&radioBuffer), numbytes,
+        (uint32_t)(getFreq() * 1.0e6f),
+        sf, (uint32_t)(bw * 1000.0f), cr, power);
+#endif
     meshtastic_MeshPacket *p = packetPool.allocCopy(*txp);
     perhapsDecode(p);
     meshtastic_Compressed c = meshtastic_Compressed_init_default;

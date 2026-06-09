@@ -12,6 +12,15 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+/* C++ includes for mesh packet delivery */
+#include "mesh/RadioInterface.h"
+#include "mesh/Router.h"
+#include "mesh/MeshTypes.h"
+#include "concurrency/NotifiedWorkerThread.h"
+#include <atomic>
+#include <mutex>
+#include <queue>
+
 #define MTK_IPC_MAGIC0 'M'
 #define MTK_IPC_MAGIC1 'T'
 #define MTK_IPC_MAGIC2 'K'
@@ -29,6 +38,147 @@
 
 static pthread_once_t g_start_once = PTHREAD_ONCE_INIT;
 static pthread_t g_thread;
+
+/* -------- Thread-safe uplink delivery into the mesh router -------- */
+
+struct ShimRxFrame {
+    float    snr;
+    int16_t  rssi;
+    uint16_t data_len;
+    uint8_t  data[MAX_LORA_PAYLOAD_LEN];
+};
+
+static std::mutex              g_rx_mutex;
+static std::queue<ShimRxFrame> g_rx_queue;
+
+namespace {
+
+class ShimDeliveryThread : public concurrency::NotifiedWorkerThread
+{
+  public:
+    ShimDeliveryThread() : concurrency::NotifiedWorkerThread("ShimRx") {}
+
+  protected:
+    void onNotify(uint32_t /*notification*/) override
+    {
+        for (;;) {
+            ShimRxFrame frame;
+            {
+                std::lock_guard<std::mutex> lk(g_rx_mutex);
+                if (g_rx_queue.empty()) break;
+                frame = g_rx_queue.front();
+                g_rx_queue.pop();
+            }
+            deliverFrame(frame);
+        }
+    }
+
+  private:
+    static void deliverFrame(const ShimRxFrame &f)
+    {
+        if (f.data_len < sizeof(PacketHeader)) {
+            fprintf(stderr, "[MTK_NATIVE_IPC] frame too short (%u), dropping\n", f.data_len);
+            return;
+        }
+        const PacketHeader *hdr = reinterpret_cast<const PacketHeader *>(f.data);
+        if (hdr->from == 0) return;
+
+        int32_t enc_len = (int32_t)f.data_len - (int32_t)sizeof(PacketHeader);
+        if (enc_len < 0) return;
+
+        meshtastic_MeshPacket *mp = packetPool.allocZeroed();
+        if (!mp) {
+            fprintf(stderr, "[MTK_NATIVE_IPC] packetPool exhausted, dropping\n");
+            return;
+        }
+
+        mp->from       = hdr->from;
+        mp->to         = hdr->to;
+        mp->id         = hdr->id;
+        mp->channel    = hdr->channel;
+        mp->hop_limit  = hdr->flags & PACKET_FLAGS_HOP_LIMIT_MASK;
+        mp->hop_start  = (hdr->flags & PACKET_FLAGS_HOP_START_MASK) >> PACKET_FLAGS_HOP_START_SHIFT;
+        mp->want_ack   = !!(hdr->flags & PACKET_FLAGS_WANT_ACK_MASK);
+        mp->via_mqtt   = !!(hdr->flags & PACKET_FLAGS_VIA_MQTT_MASK);
+        mp->next_hop   = (mp->hop_start == 0) ? NO_NEXT_HOP_PREFERENCE : hdr->next_hop;
+        mp->relay_node = (mp->hop_start == 0) ? NO_RELAY_NODE       : hdr->relay_node;
+        mp->rx_snr     = f.snr;
+        mp->rx_rssi    = (int32_t)f.rssi;
+        mp->rx_time    = (uint32_t)time(NULL);
+        mp->which_payload_variant = meshtastic_MeshPacket_encrypted_tag;
+        mp->transport_mechanism   = meshtastic_MeshPacket_TransportMechanism_TRANSPORT_LORA;
+
+        if (enc_len > 0) {
+            if ((uint32_t)enc_len > sizeof(mp->encrypted.bytes)) {
+                fprintf(stderr, "[MTK_NATIVE_IPC] enc payload too large (%d), dropping\n", enc_len);
+                packetPool.release(mp);
+                return;
+            }
+            memcpy(mp->encrypted.bytes, f.data + sizeof(PacketHeader), enc_len);
+            mp->encrypted.size = (uint32_t)enc_len;
+        }
+
+        if (router) {
+            fprintf(stderr, "[MTK_NATIVE_IPC] deliver from=0x%08x to=0x%08x id=0x%08x enc=%d\n",
+                    mp->from, mp->to, mp->id, enc_len);
+            router->enqueueReceivedMessage(mp);
+        } else {
+            fprintf(stderr, "[MTK_NATIVE_IPC] router not ready, dropping\n");
+            packetPool.release(mp);
+        }
+    }
+};
+
+} // namespace
+
+static ShimDeliveryThread *g_delivery_thread = nullptr;
+static std::atomic<int> g_client_fd{-1};
+
+static void enqueue_shim_rx(const uint8_t *data, uint16_t data_len, float snr, int16_t rssi)
+{
+    if (data_len == 0 || data_len > MAX_LORA_PAYLOAD_LEN) return;
+    ShimRxFrame frame;
+    frame.snr      = snr;
+    frame.rssi     = rssi;
+    frame.data_len = data_len;
+    memcpy(frame.data, data, data_len);
+    { std::lock_guard<std::mutex> lk(g_rx_mutex); g_rx_queue.push(frame); }
+    if (g_delivery_thread) g_delivery_thread->notify(1, false);
+}
+
+extern "C" void sx1302_ipc_shim_tx(const uint8_t *buf, size_t len, uint32_t freq_hz,
+                                    uint8_t sf, uint32_t bw_hz, uint8_t cr, int8_t tx_power_dbm)
+{
+    uint8_t msg[MTK_IPC_MAX_FRAME];
+    size_t off = 0;
+
+    if (len == 0 || len > 255U) return;
+
+    int fd = g_client_fd.load(std::memory_order_relaxed);
+    if (fd < 0) {
+        fprintf(stderr, "[MTK_NATIVE_IPC] TX: no client connected, dropping\n");
+        return;
+    }
+
+    if (append_u32le(msg, sizeof(msg), &off, freq_hz) != 0 ||
+        append_u32le(msg, sizeof(msg), &off, 0U) != 0 ||
+        append_i16le(msg, sizeof(msg), &off, (int16_t)tx_power_dbm) != 0 ||
+        append_u32le(msg, sizeof(msg), &off, bw_hz) != 0 ||
+        append_u8(msg, sizeof(msg), &off, sf) != 0 ||
+        append_u8(msg, sizeof(msg), &off, cr) != 0 ||
+        append_u8(msg, sizeof(msg), &off, 0U) != 0 ||
+        append_u16le(msg, sizeof(msg), &off, (uint16_t)len) != 0) {
+        return;
+    }
+
+    if ((off + len) > sizeof(msg)) return;
+    memcpy(msg + off, buf, len);
+    off += len;
+
+    fprintf(stderr, "[MTK_NATIVE_IPC] TX freq=%" PRIu32 " sf=%u bw=%" PRIu32 " len=%zu\n",
+            freq_hz, (unsigned)sf, bw_hz, len);
+    (void)send_frame(fd, MTK_IPC_TYPE_DOWNLINK, msg, (uint16_t)off);
+}
 
 static uint16_t read_u16le(const uint8_t *p)
 {
@@ -208,7 +358,7 @@ static void *shim_thread_main(void *arg)
                 continue;
             }
             fprintf(stderr, "[MTK_NATIVE_IPC] client connected\n");
-        }
+            g_client_fd.store(client_fd, std::memory_order_relaxed);
 
         n = recv(client_fd, frame, sizeof(frame), 0);
         if (n < 0) {
@@ -216,6 +366,7 @@ static void *shim_thread_main(void *arg)
                 continue;
             }
             fprintf(stderr, "[MTK_NATIVE_IPC] recv failed: %s\n", strerror(errno));
+            g_client_fd.store(-1, std::memory_order_relaxed);
             close(client_fd);
             client_fd = -1;
             continue;
@@ -223,6 +374,7 @@ static void *shim_thread_main(void *arg)
 
         if (n == 0) {
             fprintf(stderr, "[MTK_NATIVE_IPC] client disconnected\n");
+            g_client_fd.store(-1, std::memory_order_relaxed);
             close(client_fd);
             client_fd = -1;
             continue;
@@ -264,6 +416,7 @@ static void *shim_thread_main(void *arg)
                         fprintf(stderr,
                                 "[MTK_NATIVE_IPC] UPLINK freq=%" PRIu32 " sf=%u bw=%" PRIu32 " cr=%u rssi=%d snr=%.2f len=%u\n",
                                 freq_hz, sf, bw_hz, cr, rssi, snr, data_len);
+                        enqueue_shim_rx(data, data_len, snr, rssi);
                         if (echo_downlink && send_echo_downlink(client_fd, data, data_len, freq_hz, tmst, bw_hz, sf, cr, rf_chain) == 0) {
                             fprintf(stderr, "[MTK_NATIVE_IPC] DOWNLINK echo queued len=%u\n", data_len);
                         }
@@ -297,6 +450,8 @@ static void start_once(void)
 
     strncpy(socket_buf, socket_path, sizeof(socket_buf) - 1);
     socket_buf[sizeof(socket_buf) - 1] = '\0';
+
+    g_delivery_thread = new ShimDeliveryThread();
 
     if (pthread_create(&g_thread, NULL, shim_thread_main, socket_buf) != 0) {
         fprintf(stderr, "[MTK_NATIVE_IPC] failed to start thread\n");
