@@ -466,11 +466,6 @@ extern "C" void sx1302_ipc_shim_start(void)
     pthread_once(&g_start_once, start_once);
 }
 
-__attribute__((constructor)) static void sx1302_ipc_shim_autostart(void)
-{
-    sx1302_ipc_shim_start();
-}
-
 #else
 
 extern "C" void sx1302_ipc_shim_start(void)
