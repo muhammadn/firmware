@@ -81,7 +81,12 @@ class RadioLibInterface : public RadioInterface, protected concurrency::Notified
      * We now use 0x2b (so that someday we can possibly use NOT 2b - because that would be funny pun).  We will be staying with
      * this code for a long time.
      */
-    const uint8_t syncWord = 0x2b;
+    /* NOTE: SX1302 concentrator FRAME_SYNCH registers are 5-bit signed (max +15).
+     * Sync word 0x2b requires PEAK2=22, which overflows the register and breaks RX.
+     * Only sync words with lower nibble ≤ 7 are representable (max PEAK2 = 2×7 = 14).
+     * Using 0x12 (peaks 2,4) — the SX1302 private network default.
+     * This means this bridge is incompatible with stock Meshtastic firmware 0x2b nodes. */
+    const uint8_t syncWord = 0x12;
 
     float currentLimit = 100; // 100mA OCP - Should be acceptable for RFM95/SX127x chipset.
 
