@@ -213,29 +213,35 @@ void SimRadio::startSend(meshtastic_MeshPacket *txp)
     isReceiving = false;
     size_t numbytes = beginSending(txp);
 #if defined(SX1302_NATIVE_IPC_SHIM_ENABLE) && defined(__linux__)
+    // Hardware IPC shim handles the actual TX — no simulator feedback needed.
     sx1302_ipc_shim_tx(
         reinterpret_cast<const uint8_t *>(&radioBuffer), numbytes,
         (uint32_t)(getFreq() * 1.0e6f),
         sf, (uint32_t)(bw * 1000.0f), cr, power);
-#endif
+#else
     meshtastic_MeshPacket *p = packetPool.allocCopy(*txp);
-    perhapsDecode(p);
-    meshtastic_Compressed c = meshtastic_Compressed_init_default;
-    c.portnum = p->decoded.portnum;
-    // LOG_DEBUG("Send back to simulator with portNum %d", p->decoded.portnum);
-    if (p->decoded.payload.size <= sizeof(c.data.bytes)) {
-        memcpy(&c.data.bytes, p->decoded.payload.bytes, p->decoded.payload.size);
-        c.data.size = p->decoded.payload.size;
-    } else {
-        LOG_WARN("Payload size larger than compressed message allows! Send empty payload");
-    }
-    p->decoded.payload.size =
-        pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_Compressed_msg, &c);
-    p->decoded.portnum = meshtastic_PortNum_SIMULATOR_APP;
+    DecodeState ds = perhapsDecode(p);
+    if (ds == DecodeState::DECODE_SUCCESS) {
+        meshtastic_Compressed c = meshtastic_Compressed_init_default;
+        c.portnum = p->decoded.portnum;
+        // LOG_DEBUG("Send back to simulator with portNum %d", p->decoded.portnum);
+        if (p->decoded.payload.size <= sizeof(c.data.bytes)) {
+            memcpy(&c.data.bytes, p->decoded.payload.bytes, p->decoded.payload.size);
+            c.data.size = p->decoded.payload.size;
+        } else {
+            LOG_WARN("Payload size larger than compressed message allows! Send empty payload");
+        }
+        p->decoded.payload.size =
+            pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_Compressed_msg, &c);
+        p->decoded.portnum = meshtastic_PortNum_SIMULATOR_APP;
 
-    service->sendQueueStatusToPhone(router->getQueueStatus(), 0, p->id);
-    service->sendToPhone(p); // Sending back to simulator
-    service->loop();         // Process the send immediately
+        service->sendQueueStatusToPhone(router->getQueueStatus(), 0, p->id);
+        service->sendToPhone(p); // Sending back to simulator
+        service->loop();         // Process the send immediately
+    } else {
+        packetPool.release(p);
+    }
+#endif
 }
 
 // Simulates device received a packet via the LoRa chip
